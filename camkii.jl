@@ -81,16 +81,19 @@ function cam!(du, u, p, t)
     # Rate of CaM-Ca association
     _v_cam(ca, cam1, cam2, k⁺, k⁻) = k⁺ * ca * cam1 - k⁻ * cam2
     @unpack TOT_CAM, K1, Km1, K2, Km2, K3, Km3, K4, Km4 = p
-    cam_ca1 = u[1]
-    cam_ca2 = u[2]
-    cam_ca3 = u[3]
-    cam_ca4 = u[4]
-    Ca = u[8]
+    @views cam_ca1 = u[:, 1]
+    @views cam_ca2 = u[:, 2]
+    @views cam_ca3 = u[:, 3]
+    @views cam_ca4 = u[:, 4]
+    @views Ca = u[:, 8]
     cam = TOT_CAM - (cam_ca1 + cam_ca2 + cam_ca3 + cam_ca4)
     v_ca1 = _v_cam(Ca, cam, cam_ca1, K1, Km1)
     v_ca2 = _v_cam(Ca, cam_ca1, cam_ca2, K2, Km2)
     v_ca3 = _v_cam(Ca, cam_ca2, cam_ca3, K3, Km3)
     v_ca4 = _v_cam(Ca, cam_ca3, cam_ca4, K4, Km4)
+    @. @views du[:, 1] = _v_cam(Ca, TOT_CAM - (cam_ca1 + cam_ca2 + cam_ca3 + cam_ca4), cam_ca1, K1, Km1) - _v_cam(Ca, cam_ca1, cam_ca2, K2, Km2)
+    @. @views du[:, 2] = _v_cam(Ca, cam_ca1, cam_ca2, K2, Km2) - _v_cam(Ca, cam_ca2, cam_ca3, K3, Km3)
+
     du[1] = d_cam_ca1 = v_ca1 - v_ca2
     du[2] = d_cam_ca2 = v_ca2 - v_ca3
     du[3] = d_cam_ca3 = v_ca3 - v_ca4
