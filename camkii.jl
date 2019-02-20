@@ -6,205 +6,176 @@ Biophysical Journal. 2008;95(5):2139-2149. doi:10.1529/biophysj.107.118505.
 DOI: 10.1529/biophysj.107.118505, PMID: 18502812, PMCID: PMC2517018
 =#
 
-
 using DifferentialEquations, Parameters, LabelledArrays
+using Plots
+pyplot()
 
-#=
-Default params
-TOT_CAM = 6e-3
-K1 = 2.5
-Km1 = 0.05
-K2 = 88.25
-Km2 = 0.05
-K3 = 12.5
-Km3 = 1.25
-K4 = 250
-Km4 = 1.25
-Ca
-K_ASSO = 1.4e-4  (α isoform), 0.7e-4 (δ isoform)
-K_DISSO = 1.9e-3  (α isoform), 0.95e-3 (δ isoform)
-K_DISSO_2 = 1E-3 * K_DISSO
-K_DISSO_CA = 1.9e-3  (α isoform), 0.95e-3 (δ isoform)
-K_DISSO_CA_2 = 1E-3 * K_DISSO_CA
-KM_CAM = 3E-5
-KCAT = 9E-4  (α isoform), 54E-4 (δ isoform)
-KM_ATP = 19.1E-3
-KCAT_PP1 = 1.72E-3
-KM_PP1 = 11E-3
-=#
+# Michaelis-Menton and Hill function (from my CMC model)
+_mm(x, k=one(x)) = x / (x + k)
+_mm_reci(x, k=one(x)) = (x + k) / x
+_hill(x, k, n) = _mm(x^n, k^n)
+_hill_reci(x, k, n) = _mm_reci(x^n, k^n)
+_comp(x) = one(x) - x
 
-_hills(x, k, n) = x^n / (x^n + k^n)
-_mm(x, k) = x / (x + k)
+@with_kw struct CaMParams
+    ΣCAM = 6.0e-3
+    k1_p = 2.5
+    k1_m = 0.05
+    k2_p = 88.25
+    k2_m = 0.05
+    k3_p = 12.5
+    k3_m = 1.25
+    k4_p = 250
+    k4_m = 1.25
+end
+
+# Calmodulin system
+function cam_sys(camca1, camca2, camca3, camca4, ca, pCaM::CaMParams)
+    cam = pCaM.ΣCAM - (camca1 + camca2 + camca3 + camca4)
+    @unpack k1_p, k1_m, k2_p, k2_m, k3_p, k3_m, k4_p, k4_m = pCaM
+    v1 = k1_p * cam * ca - k1_m * camca1
+    v2 = k2_p * camca1 * ca - k2_m * camca2
+    v3 = k3_p * camca2 * ca - k3_m * camca3
+    v4 = k4_p * camca3 * ca - k4_m * camca4
+    dcamca1 = v1 - v2
+    dcamca2 = v2 - v3
+    dcamca3 = v3 - v4
+    dcamca4 = v4
+    return (dcamca1, dcamca2, dcamca3, dcamca4)
+end
 
 # δ Isoform by default (All concentrations in mM and time in ms)
-@with_kw_noshow struct CAMKIIParams
-    # concentrations
-    TOT_CAM = 6.0e-3
-    TOT_CAMKII = 0.1e-3
-    ATP = 1.0
-    PP1 = 1e-6
-    # CaM association and idssociation constant
-    K_P1 = 2.5
-    K_M1 = 0.05
-    K_P2 = 88.25
-    K_M2 = 0.05
-    K_P3 = 12.5
-    K_M3 = 1.25
-    K_P4 = 250
-    K_M4 = 1.25
-    # CaMKII association and idssociation constant
-    K_ASSO = 2.1
-    K_DISSO = 0.7E-4
-    K_DISSO_2 = 1E-3 * K_DISSO
-    K_DISSO_CA = 0.95e-3
-    K_DISSO_CA_2 = 1E-3 * K_DISSO_CA
+@with_kw struct CAMKIIParams
+    ΣCAMKII = 0.1e-3  # CaMKII concentrations
+    PP1 = 0.1e-3     # Phosphatase 1 concentrations
+    # rate constantS
+    KA = 2.1
+    KD = 0.7E-4
+    KD_CA = 0.95e-3
+    KD_2 = 1E-3 * KD
+    KD_CA_2 = 1E-3 * KD_CA
     KM_CAM = 3E-5
-    KCAT = 5.4E-3
+    KCAT = 5.4E-3  # 310K
     KM_ATP = 19.1E-3
-
-    ATP_FAC = _hills(ATP, KM_ATP, 1)
     KCAT_PP1 = 1.72E-3
     KM_PP1 = 11E-3
-    PP1 = 1e-6
-    # Calcium Pulse parameters
+    VMAX_PP1 = PP1 * KCAT_PP1
+end
+
+pCAMKIIδ = CAMKIIParams()
+pCAMKIIα = CAMKIIParams(pCAMKIIδ;
+                        KD = 2 * pCAMKIIδ.KD,
+                        KD_CA = 2 * pCAMKIIδ.KD_CA,
+                        KD_2 = 2 * pCAMKIIδ.KD_2,
+                        KD_CA_2 = 2 * pCAMKIIδ.KD_CA_2,
+                        KCAT = pCAMKIIδ.KCAT / 6)
+
+_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p::CAMKIIParams) = p.ΣCAMKII - camkii_camca4 - camkii_p_camca4 - camkii_p
+inactive_camkii(camkii, p::CAMKIIParams) = camkii / p.ΣCAMKII
+active_camkii(camkii, p::CAMKIIParams) = _comp(inactive_camkii(camkii, p))
+inactive_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p::CAMKIIParams) = inactive_camkii(_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p), p)
+active_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p::CAMKIIParams) = (camkii_camca4 + camkii_p_camca4 + camkii_p) / p.ΣCAMKII
+
+function camkii_sys(camkii_camca4, camkii_p_camca4, camkii_p, camca4, ca, atp, p::CAMKIIParams)
+    camkii = _camkii(camkii_camca4, camkii_p_camca4, camkii_p, p)
+    @unpack KA, KD, KD_CA, KM_CAM, KD_2, KD_CA_2 = p
+    a1 = KA * camkii * camca4
+    c2 = KA * camkii_p * camca4
+    ϕcam = _hill(ca, KM_CAM, 3)
+    a2 = (KD * _comp(ϕcam) + KD_CA * ϕcam) * camkii_camca4
+    c1 = (KD_2 * _comp(ϕcam) + KD_CA_2 * ϕcam) * camkii_p_camca4
+
+    @unpack KCAT, KM_ATP, VMAX_PP1, KM_PP1 = p
+    P = _comp(inactive_camkii(camkii, p)^2)
+    b1 = KCAT * P * _mm(atp, KM_ATP) * camkii_camca4
+    b2 = VMAX_PP1 * _mm(camkii_p_camca4, KM_PP1)
+    d1 = VMAX_PP1 * _mm(camkii_p, KM_PP1)
+    v1 = a1 - a2
+    v2 = b1 - b2
+    v3 = c1 - c2
+    v4 = d1
+    dcamkii_p = v3 - v4
+    dcamkii_camca4 = v1 - v2
+    dcamkii_p_camca4 = v2 - v3
+    return  dcamkii_camca4, dcamkii_p_camca4, dcamkii_p
+end
+
+# Parameters for Calcium transient
+@with_kw struct CaTransientParams
     INTERVAL = 0
     KP = 12e-6
     KM_PUMP = 0.1e-3
     QPUMP_REST = 40e-6
     QM = 60E-6
     TP = 25.0
-    # CaMKII target paramaters
-    KCAT_TARGET = 1E-3
-    MAX_SS_INHIB = 0.1
-    KD_TARGET = KCAT_TARGET * MAX_SS_INHIB / (1 - MAX_SS_INHIB)
 end
 
-u0 = @LVector zeros(8) (:ca, :camca1, :camca2, :camca3, :camca4, :camk2_camca4, :camk2_p, :camk2_p_camca4)
-
-function pulse_ca!(du, u, p, t)
+function ca_transient(ca, t, p::CaTransientParams)
     @unpack KP, KM_PUMP, QM, TP, QPUMP_REST, INTERVAL = p
-    if INTERVAL > 0
-        localTime = rem(t, INTERVAL)
-        ca = u.ca
-        q_pump = KP * _hills(ca, KM_PUMP, 2)
-        q_rel = QM * (localTime/TP * exp(1 - localTime/TP))^4 + QPUMP_REST
-        du.ca = q_rel - q_pump
-    else
-        du.ca = 0.0
+    localTime = rem(t, INTERVAL)
+    x = localTime/TP
+    q_pump = KP * _hill(ca, KM_PUMP, 2)
+    q_rel = QM * (x * exp(1 - x))^4 + QPUMP_REST
+    dca = q_rel - q_pump
+    if INTERVAL == 0
+        dca = zero(dca)
     end
-    return du
+    return dca
 end
 
-function cam_system!(du, u, p, t)
-    @unpack TOT_CAM, KP1, KM1, KP2, KM2, KP3, KM3, KP4, KM4 = p
-    cam = TOT_CAM - (u.camca1 + u.camca2 + u.camca3 + u.camca4)
-    v1 = u.ca * cam * KP1 - u.camca1 * KM1
-    v2 = u.ca * u.camca1 * KP2 - u.camca2 * KM2
-    v1 = u.ca * u.camca1 * KP3 - u.camca3 * KM3
-    v1 = u.ca * u.camca1 * KP4 - u.camca4 * KM4
+# Phosphorylatio of targets (mtCK, ion channels) by active camkii
+@with_kw struct TargetParams
+    KmCaMK = 0.15    # From OR dmodel
 end
 
-function camkk2_system!(du, u, p, t)
+phosphorylation_portion(camkii, pCaMKII::CAMKIIParams, pTarget::TargetParams) = _mm(active_camkii(camkii, pCaMKII), pTarget.KmCaMK)
 
+# The model parameters
+@with_kw struct ModelParams
+    pCaM = CaMParams()
+    pCAMK = CAMKIIParams()
+    pCaT = CaTransientParams()
+    pTarget = TargetParams()
+    ATP = 0.0
 end
 
-function cam!(du, u, p, t)
-    # Rate of CaM-Ca association
-    _v_cam(ca, cam1, cam2, k⁺, k⁻) = k⁺ * ca * cam1 - k⁻ * cam2
-    @unpack TOT_CAM, K1, Km1, K2, Km2, K3, Km3, K4, Km4 = p
-    @views cam_ca1 = u[:, 1]
-    @views cam_ca2 = u[:, 2]
-    @views cam_ca3 = u[:, 3]
-    @views cam_ca4 = u[:, 4]
-    @views Ca = u[:, 8]
-    cam = TOT_CAM - (cam_ca1 + cam_ca2 + cam_ca3 + cam_ca4)
-    v_ca1 = _v_cam(Ca, cam, cam_ca1, K1, Km1)
-    v_ca2 = _v_cam(Ca, cam_ca1, cam_ca2, K2, Km2)
-    v_ca3 = _v_cam(Ca, cam_ca2, cam_ca3, K3, Km3)
-    v_ca4 = _v_cam(Ca, cam_ca3, cam_ca4, K4, Km4)
-    @. @views du[:, 1] = _v_cam(Ca, TOT_CAM - (cam_ca1 + cam_ca2 + cam_ca3 + cam_ca4), cam_ca1, K1, Km1) - _v_cam(Ca, cam_ca1, cam_ca2, K2, Km2)
-    @. @views du[:, 2] = _v_cam(Ca, cam_ca1, cam_ca2, K2, Km2) - _v_cam(Ca, cam_ca2, cam_ca3, K3, Km3)
+p_ref = ModelParams()
 
-    du[1] = d_cam_ca1 = v_ca1 - v_ca2
-    du[2] = d_cam_ca2 = v_ca2 - v_ca3
-    du[3] = d_cam_ca3 = v_ca3 - v_ca4
-    du[4] = d_cam_ca4 = v_ca4
-    return du
+# The RHS of the model
+function rhs!(du, u, p::ModelParams, t)
+    @unpack ATP, pCAMK, pCaM, pTarget, pCaT = p
+    du.camkii_camca4, du.camkii_p_camca4, du.camkii_p = camkii_sys(u.camkii_camca4, u.camkii_p_camca4, u.camkii_p, u.camca4, u.ca, ATP, pCAMK)
+    du.camca1, du.camca2, du.camca3, du.camca4 = cam_sys(u.camca1, u.camca2, u.camca3, u.camca4, u.ca, pCaM)
+    du.ca = ca_transient(u.ca, t, pCaT)
 end
 
+# Reference Initial conditions
+u0_ref = LVector(camca1 = 0.0, camca2 = 0.0, camca3 = 0.0, camca4 = 0.0, camkii_p = 0.0, camkii_camca4 = 0.0, camkii_p_camca4 = 0.0, ca = 0.1e-3)
 
-function ca_pulse!(du, u, p, t)
-    @unpack KP, KM_PUMP, QM, TP, QPUMP_REST, INTERVAL = p
-    Ca = u[8]
-    q_pump = KP /(1 + (KM_PUMP / Ca)^2)
-    q_rel = QM * (t/TP * exp(1 - t/TP))^4 + QPUMP_REST
-    du[8] = dCa = q_rel - q_pump
-    return du
+u0 = copy(u0_ref)
+u0.ca = 0.5
+
+p = ModelParams(pCaM=CaMParams(ΣCAM = 1e-3))
+prob = SteadyStateProblem(rhs!, u0, p)
+sol = solve(prob, DynamicSS(Tsit5()))
+uend = sol.u[end]
+active_camkii(uend.camkii_camca4, uend.camkii_p_camca4, uend.camkii_p, p.pCAMK)
+
+# Generate figure 2 A in the paper
+function fig2A()
+    function get_camkii_act(cam_tot)
+        u0 = copy(u0_ref)
+        u0.ca = 0.5
+        p = ModelParams(pCaM=CaMParams(ΣCAM = cam_tot), pCAMK = CAMKIIParams(pCAMKIIδ))
+        prob = SteadyStateProblem(rhs!, u0, p)
+        sol = solve(prob, SSRootfind())
+        # uend = sol.u[end]
+        uend = sol.u
+        active_camkii(uend.camkii_camca4, uend.camkii_p_camca4, uend.camkii_p, p.pCAMK)
+    end
+    cam_tots = 10 .^ (-6:0.01:-2)
+    camkii_acts = get_camkii_act.(cam_tots)
+    plot(cam_tots, camkii_acts, xscale = :log10, xlabel = "Total CaM", ylabel="Active CaMKII")
 end
 
-
-function target!(du, u, p, t)
-    @unpack KCAT_TARGET, KD_TARGET, TOT_CAMKII = p
-    camkii = TOT_CAMKII - u[5] - u[6] - u[7]
-    target = u[9]
-    du[9] = -KCAT_TARGET * target * (TOT_CAMKII - camkii) + KD_TARGET * (1 - target)
-    return du
-end
-
-
-function camkii!(du, u, p, t)
-    @unpack (ATP_FAC, PP1, TOT_CAMKII,
-            K_ASSO, K_DISSO, K_DISSO_2,K_DISSO_CA, K_DISSO_CA_2, KM_CAM, KCAT,
-            KM_ATP, KCAT_PP1, KM_PP1) = p
-
-    cam_ca4 = u[4]
-    camkii_camca4 = u[5]
-    camkii_p = u[6]
-    camkii_p_camca4 = u[7]
-    Ca = u[8]
-    camkii = TOT_CAMKII - camkii_camca4 - camkii_p - camkii_p_camca4
-    # Association of CaMKII and CaMCa4
-    a1 = K_ASSO * camkii * cam_ca4
-
-    # Dissociation of CaMKII and CaMCa4
-    h = _hills(Ca, KM_CAM, 3)
-    a2 = (K_DISSO * (1 - h) + K_DISSO_CA * h) * camkii_camca4
-
-    # Autophosphorylation of CaMKII subunits
-    p = 1 - (camkii / TOT_CAMKII)^2
-    b1 = KCAT * p * ATP_FAC * camkii_camca4
-
-    # Dephosphorylation by phosphorylase (PP1)
-    b2 = KCAT_PP1 * PP1 * _mm(camkii_p_camca4, KM_PP1)
-    d1 = KCAT_PP1 * PP1 *_mm(camkii_p, KM_PP1)
-
-    # Dissociation of CaMKII-p and CaMCa4 (1000x slower)
-    c1 = (K_DISSO_2 * (1 - h) + K_DISSO_CA_2 * h) * camkii_p_camca4
-
-    # Association of CaMKII-p and CaMCa4
-    c2 = K_ASSO * camkii_p * cam_ca4
-
-    du[5] = d_camkii_camca4 = a1 - a2 - b1 + b2
-    du[6] = d_camkii_p = c1 - c2 - d1
-    du[7] = d_camkii_p_camca4 = b1 - b2 - c1 + c2
-    return du
-end
-
-param
-u₀ = zeros(length(labels))
-u₀[labels[:Ca]] = 0.5
-u₀[labels[:target]] = 1.0
-tspan = (0.0, 1000.0)
-prob = ODEProblem(camkii, u₀, tspan, CAMKIIParams())
-
-sol = solve(prob, Tsit5())
-
-
-using Plots
-gr()
-
-sol[3,:]
-
-savefig("plot.png")
-
-scatter(rand(100000))
+fig2A()
