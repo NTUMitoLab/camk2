@@ -6,7 +6,9 @@ Biophysical Journal. 2008;95(5):2139-2149. doi:10.1529/biophysj.107.118505.
 DOI: 10.1529/biophysj.107.118505, PMID: 18502812, PMCID: PMC2517018
 =#
 
-using DifferentialEquations, Parameters, LabelledArrays, Plots
+using DifferentialEquations, Parameters, LabelledArrays
+using Plots
+pyplot()
 
 # Michaelis-Menton and Hill function (from my CMC model)
 _mm(x, k=one(x)) = x / (x + k)
@@ -42,10 +44,6 @@ function cam_sys(camca1, camca2, camca3, camca4, ca, pCaM::CaMParams)
     return (dcamca1, dcamca2, dcamca3, dcamca4)
 end
 
-function cam_sys!(du, u, pCaM::CaMParams)
-    du.camca1, du.camca2, du.camca3, du.camca4 = cam_sys(u.camca1, u.camca2, u.camca3, u.camca4, u.ca, pCaM)
-end
-
 # δ Isoform by default (All concentrations in mM and time in ms)
 @with_kw struct CAMKIIParams
     ΣCAMKII = 0.1e-3  # CaMKII concentrations
@@ -72,21 +70,20 @@ pCAMKIIα = CAMKIIParams(pCAMKIIδ;
                         KD_CA_2 = 2 * pCAMKIIδ.KD_CA_2,
                         KCAT = pCAMKIIδ.KCAT / 6)
 
-_camkii(camkii_camca4, camkii_p_camca4, camkii_p, pCaMKII::CAMKIIParams) = pCaMKII.ΣCAMKII - camkii_camca4 - camkii_p_camca4 - camkii_p
-_camkii(u, pCaMKII::CAMKIIParams) = _camkii(u.camkii_camca4, u.camkii_p_camca4, u.camkii_p, pCaMKII)
+_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p::CAMKIIParams) = p.ΣCAMKII - camkii_camca4 - camkii_p_camca4 - camkii_p
 inactive_camkii(camkii, p::CAMKIIParams) = camkii / p.ΣCAMKII
 active_camkii(camkii, p::CAMKIIParams) = _comp(inactive_camkii(camkii, p))
 inactive_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p::CAMKIIParams) = inactive_camkii(_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p), p)
 active_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p::CAMKIIParams) = (camkii_camca4 + camkii_p_camca4 + camkii_p) / p.ΣCAMKII
 
-function camkii_sys(camkii_camca4, camkii_p_camca4, camkii_p, camca4, ca, atp, pCaMKII::CAMKIIParams)
-    camkii = _camkii(camkii_camca4, camkii_p_camca4, camkii_p, pCaMKII)
-    @unpack KA, KD, KD_CA, KM_CAM, KD_2, KD_CA_2 = pCaMKII
+function camkii_sys(camkii_camca4, camkii_p_camca4, camkii_p, camca4, ca, atp, p::CAMKIIParams)
+    camkii = _camkii(camkii_camca4, camkii_p_camca4, camkii_p, p)
+    @unpack KA, KD, KD_CA, KM_CAM, KD_2, KD_CA_2 = p
     a1 = KA * camkii * camca4
     c2 = KA * camkii_p * camca4
     ϕcam = _hill(ca, KM_CAM, 3)
-    a2 = (KD * ϕcam + KD_CA * _comp(ϕcam)) * camkii_camca4
-    c1 = (KD_2 * ϕcam + KD_CA_2 * _comp(ϕcam)) * camkii_p_camca4
+    a2 = (KD * _comp(ϕcam) + KD_CA * ϕcam) * camkii_camca4
+    c1 = (KD_2 * _comp(ϕcam) + KD_CA_2 * ϕcam) * camkii_p_camca4
 
     @unpack KCAT, KM_ATP, VMAX_PP1, KM_PP1 = p
     P = _comp(inactive_camkii(camkii, p)^2)
