@@ -105,7 +105,7 @@ end
 
 # Parameters for Calcium transient
 @with_kw struct CaTransientParams
-    INTERVAL = 0
+    INTERVAL = 1000  # BCL = 1s by defaul
     KP = 12e-6
     KM_PUMP = 0.1e-3
     QPUMP_REST = 40e-6
@@ -116,15 +116,19 @@ end
 function ca_transient(ca, t, p::CaTransientParams)
     @unpack KP, KM_PUMP, QM, TP, QPUMP_REST, INTERVAL = p
     localTime = rem(t, INTERVAL)
-    x = localTime/TP
+    tt = localTime/TP
     q_pump = KP * _hill(ca, KM_PUMP, 2)
-    q_rel = QM * (x * exp(1 - x))^4 + QPUMP_REST
+    q_rel = QM * tt^4 * exp(4*(1 - tt)) + QPUMP_REST
     dca = q_rel - q_pump
-    if INTERVAL == 0
-        dca = zero(dca)
-    end
     return dca
 end
+
+caTProb = ODEProblem((u,p,t)->ca_transient(u, t, p), 1e-3, (0.0, 10000.0),  CaTransientParams())
+sol = solve(caTProb, tstops=0.0:1000.0:10000.0)
+
+plot(sol)
+
+plot(t->ca_transient(1e-3, t, CaTransientParams()), 0.0, 1e4)
 
 # Phosphorylatio of targets (mtCK, ion channels) by active camkii
 @with_kw struct TargetParams
