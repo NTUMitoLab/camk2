@@ -6,78 +6,86 @@ Biophysical Journal. 2008;95(5):2139-2149. doi:10.1529/biophysj.107.118505.
 DOI: 10.1529/biophysj.107.118505, PMID: 18502812, PMCID: PMC2517018
 =#
 
-using DifferentialEquations, Parameters, LabelledArrays, Plots
+using DifferentialEquations, Parameters, LabelledArrays, Plots, DiffEqBiological
+using Latexify
 
-# Michaelis-Menton and Hill function (from my CMC model)
-_mm(x, k=one(x)) = x / (x + k)
-_mm_reci(x, k=one(x)) = (x + k) / x
-_hill(x, k, n) = _mm(x^n, k^n)
-_hill_reci(x, k, n) = _mm_reci(x^n, k^n)
-_comp(x) = one(x) - x
+const QPUMP_REST = 12e-6 * (40e-6^2 / (0.1e-3^2 + 40e-6^2))
 
-@with_kw struct CaMParams
-    ΣCAM = 6.0e-3
-    k1_p = 2.5
-    k1_m = 0.05
-    k2_p = 88.25
-    k2_m = 0.05
-    k3_p = 12.5
-    k3_m = 1.25
-    k4_p = 250
-    k4_m = 1.25
+@reaction_func function qrel(t, period, tp, Qm)
+    tt = (t % period) / tp
+    Qrel = Qm * (tt * exp(1 - tt))^4 + QPUMP_REST
+    return Qrel
 end
 
-# Calmodulin system
-function cam_sys(camca1, camca2, camca3, camca4, ca, pCaM::CaMParams)
-    cam = pCaM.ΣCAM - (camca1 + camca2 + camca3 + camca4)
-    @unpack k1_p, k1_m, k2_p, k2_m, k3_p, k3_m, k4_p, k4_m = pCaM
-    v1 = k1_p * cam * ca - k1_m * camca1
-    v2 = k2_p * camca1 * ca - k2_m * camca2
-    v3 = k3_p * camca2 * ca - k3_m * camca3
-    v4 = k4_p * camca3 * ca - k4_m * camca4
-    dcamca1 = v1 - v2
-    dcamca2 = v2 - v3
-    dcamca3 = v3 - v4
-    dcamca4 = v4
-    return (dcamca1, dcamca2, dcamca3, dcamca4)
+camkIIRn = @reaction_network begin
+    qrel(t, period, tp, Qm), 0 → ca
+    sign(ca) * hill(ca, Kp, KmPump, 2), ca ⇒ 0
+    (k1p * ca, k1m), CaM ↔ CaMCa1
+    (k2p * ca, k2m), CaMCa1 ↔ CaMCa2
+    (k3p * ca, k3m), CaMCa2 ↔ CaMCa3
+    (k4p * ca, k4m), CaMCa3 ↔ CaMCa4
+    kasso * CaMCa4, CaMKII → CaMKII_CaMCa4
+    hill(ca, kdisso, kmCaM, 3), CaMKII_CaMCa4 → CaMKII
+    hillr(ca, kdissoCa, kmCaM, 3), CaMKII_CaMCa4 → CaMKII
+    hill(ca, kdisso2, kmCaM, 3), CaMKIIp_CaMCa4 → CaMKIIp
+    hillr(ca, kdissoCa2, kmCaM, 3), CaMKIIp_CaMCa4 → CaMKIIp
+    mm(ATP, kcat, KmATP) * (1 - (CaMKII / (CaMKII + CaMKII_CaMCa4 + CaMKIIp_CaMCa4 + CaMKIIp))^2 ), CaMKII_CaMCa4 → CaMKIIp_CaMCa4
+    mm(CaMKIIp_CaMCa4, kcatPP1, KmPP1) * PP1, CaMKIIp_CaMCa4 ⇒ CaMKII_CaMCa4
+    mm(CaMKIIp, kcatPP1, KmPP1) * PP1, CaMKIIp ⇒ CaMKII
+end period tp Qm Kp KmPump k1p k1m k2p k2m k3p k3m k4p k4m kasso kdisso kmCaM kdissoCa kdisso2 kdissoCa2 ATP kcat KmATP kcatPP1 KmPP1 PP1
+
+speciesmap(camkIIRn)
+
+paramsmap(camkIIRn)
+
+odeexprs(camkIIRn)
+
+latexify(odeexprs(camkIIRn))
+
+# Parameters for δ type CaMKII
+pδ = LVector(
+      ca0 = 40e-6,
+      period = 1000,
+      tp = 25,
+      Qm = 60e-6,
+      Kp = 12e-6,
+      KmPump = 0.1e-3,
+      k1p = 2.5,
+      k1m = 0.05,
+      k2p = 88.25,
+      k2m = 0.05,
+      k3p = 12.5,
+      k3m = 1.25,
+      k4p =  250,
+      k4m = 1.25,
+      kasso = 2.1,
+      kdisso = 0.7E-4,
+      kmCaM = 3e-5,
+      kdissoCa = 0.95e-3,
+      kdisso2 = 1E-3 * 0.7E-4,
+      kdissoCa2 = 1E-3 * 0.95e-3,
+      ATP = 1.0,
+      kcat = 5.4E-3,
+      KmATP = 19.1E-3,
+      kcatPP1 = 1.72E-3,
+      KmPP1 = 11E-3,
+      PP1 = 0.1e-3,
+      ΣCaM = 6.0e-3,
+      ΣCaMKII = 0.1e-3)
+
+function make_α(pδ)
+    pα = LVector(pδ)
+    pα.kdisso *= 2
+    pα.kdissoCa *= 2
+    pα.kdisso2 *= 2
+    pα.kdissoCa2 *= 2
+    pα.kcat /= 6
+    return pα
 end
 
-function cam_sys!(du, u, pCaM::CaMParams)
-    du.camca1, du.camca2, du.camca3, du.camca4 = cam_sys(u.camca1, u.camca2, u.camca3, u.camca4, u.ca, pCaM)
-end
+active_camkii(u) = (u.camkii_camca4 + u.camkii_p_camca4 + u.camkii_p) / (u.camkii + u.camkii_camca4 + u.camkii_p_camca4 + u.camkii_p)
+inactive_camkii(u) = 1 - active_camkii(u)
 
-# δ Isoform by default (All concentrations in mM and time in ms)
-@with_kw struct CAMKIIParams
-    ΣCAMKII = 0.1e-3  # CaMKII concentrations
-    PP1 = 0.1e-3     # Phosphatase 1 concentrations
-    # rate constantS
-    KA = 2.1
-    KD = 0.7E-4
-    KD_CA = 0.95e-3
-    KD_2 = 1E-3 * KD
-    KD_CA_2 = 1E-3 * KD_CA
-    KM_CAM = 3E-5
-    KCAT = 5.4E-3  # 310K
-    KM_ATP = 19.1E-3
-    KCAT_PP1 = 1.72E-3
-    KM_PP1 = 11E-3
-    VMAX_PP1 = PP1 * KCAT_PP1
-end
-
-pCAMKIIδ = CAMKIIParams()
-pCAMKIIα = CAMKIIParams(pCAMKIIδ;
-                        KD = 2 * pCAMKIIδ.KD,
-                        KD_CA = 2 * pCAMKIIδ.KD_CA,
-                        KD_2 = 2 * pCAMKIIδ.KD_2,
-                        KD_CA_2 = 2 * pCAMKIIδ.KD_CA_2,
-                        KCAT = pCAMKIIδ.KCAT / 6)
-
-_camkii(camkii_camca4, camkii_p_camca4, camkii_p, pCaMKII::CAMKIIParams) = pCaMKII.ΣCAMKII - camkii_camca4 - camkii_p_camca4 - camkii_p
-_camkii(u, pCaMKII::CAMKIIParams) = _camkii(u.camkii_camca4, u.camkii_p_camca4, u.camkii_p, pCaMKII)
-inactive_camkii(camkii, p::CAMKIIParams) = camkii / p.ΣCAMKII
-active_camkii(camkii, p::CAMKIIParams) = _comp(inactive_camkii(camkii, p))
-inactive_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p::CAMKIIParams) = inactive_camkii(_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p), p)
-active_camkii(camkii_camca4, camkii_p_camca4, camkii_p, p::CAMKIIParams) = (camkii_camca4 + camkii_p_camca4 + camkii_p) / p.ΣCAMKII
 
 function camkii_sys(camkii_camca4, camkii_p_camca4, camkii_p, camca4, ca, atp, pCaMKII::CAMKIIParams)
     camkii = _camkii(camkii_camca4, camkii_p_camca4, camkii_p, pCaMKII)
